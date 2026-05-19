@@ -1,0 +1,1290 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BidTrack - Suivi Enchères Immobilières Biddit</title>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <style>
+        /* Animation pour le countdown */
+        @keyframes pulse-alert {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.7; }
+        }
+        .pulse-alert {
+            animation: pulse-alert 2s infinite;
+        }
+    </style>
+</head>
+<body class="bg-gray-50">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        // ============================================
+        // GESTION DES DONNÉES - LocalStorage
+        // ============================================
+
+        /**
+         * Initialise les données par défaut dans localStorage
+         */
+        const initializeStorage = () => {
+            if (!localStorage.getItem('bidtrack_properties')) {
+                localStorage.setItem('bidtrack_properties', JSON.stringify([]));
+            }
+        };
+
+        /**
+         * Récupère tous les biens du localStorage
+         */
+        const getProperties = () => {
+            const data = localStorage.getItem('bidtrack_properties');
+            return data ? JSON.parse(data) : [];
+        };
+
+        /**
+         * Sauvegarde les propriétés dans localStorage
+         */
+        const saveProperties = (properties) => {
+            localStorage.setItem('bidtrack_properties', JSON.stringify(properties));
+        };
+
+        /**
+         * Ajoute une nouvelle propriété
+         */
+        const addProperty = (property) => {
+            const properties = getProperties();
+            const newProperty = {
+                id: Date.now(),
+                createdAt: new Date().toISOString(),
+                ...property
+            };
+            properties.push(newProperty);
+            saveProperties(properties);
+            return newProperty;
+        };
+
+        /**
+         * Met à jour une propriété existante
+         */
+        const updateProperty = (id, updates) => {
+            const properties = getProperties();
+            const index = properties.findIndex(p => p.id === id);
+            if (index !== -1) {
+                properties[index] = { ...properties[index], ...updates };
+                saveProperties(properties);
+                return properties[index];
+            }
+            return null;
+        };
+
+        /**
+         * Supprime une propriété
+         */
+        const deleteProperty = (id) => {
+            const properties = getProperties().filter(p => p.id !== id);
+            saveProperties(properties);
+        };
+
+        /**
+         * Archive une propriété (change le statut)
+         */
+        const archiveProperty = (id) => {
+            return updateProperty(id, { status: 'Terminé' });
+        };
+
+        // ============================================
+        // COMPOSANTS UTILITAIRES
+        // ============================================
+
+        /**
+         * Composant Badge pour afficher le statut
+         */
+        const StatusBadge = ({ status }) => {
+            const statusConfig = {
+                'À visiter': { bg: 'bg-blue-100', text: 'text-blue-800', icon: '📅' },
+                'En attente': { bg: 'bg-yellow-100', text: 'text-yellow-800', icon: '⏳' },
+                'En cours': { bg: 'bg-green-100', text: 'text-green-800', icon: '🔄' },
+                'Terminé': { bg: 'bg-gray-100', text: 'text-gray-800', icon: '✓' }
+            };
+            const config = statusConfig[status] || statusConfig['En attente'];
+            return (
+                <span className={`inline-flex items-center px-3 py-1 rounded-full text-sm font-medium ${config.bg} ${config.text}`}>
+                    {config.icon} {status}
+                </span>
+            );
+        };
+
+        /**
+         * Composant Badge pour la priorité
+         */
+        const PriorityBadge = ({ priority }) => {
+            const config = {
+                'Haute': { bg: 'bg-red-100', text: 'text-red-800', icon: '🔴' },
+                'Moyenne': { bg: 'bg-orange-100', text: 'text-orange-800', icon: '🟡' },
+                'Basse': { bg: 'bg-green-100', text: 'text-green-800', icon: '🟢' }
+            };
+            const c = config[priority] || config['Moyenne'];
+            return (
+                <span className={`inline-flex items-center gap-1 px-2 py-1 rounded text-xs font-medium ${c.bg} ${c.text}`}>
+                    {c.icon} {priority}
+                </span>
+            );
+        };
+
+        /**
+         * Formatte une date
+         */
+        const formatDate = (dateString) => {
+            if (!dateString) return '-';
+            const date = new Date(dateString);
+            return new Intl.DateTimeFormat('fr-BE', {
+                day: '2-digit',
+                month: '2-digit',
+                year: 'numeric',
+                hour: '2-digit',
+                minute: '2-digit'
+            }).format(date);
+        };
+
+        /**
+         * Calcule le temps restant jusqu'à une date
+         */
+        const getTimeRemaining = (endDate) => {
+            if (!endDate) return null;
+            const now = new Date();
+            const end = new Date(endDate);
+            const diff = end - now;
+
+            if (diff < 0) return { text: 'Terminé', expired: true };
+
+            const days = Math.floor(diff / (1000 * 60 * 60 * 24));
+            const hours = Math.floor((diff % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+            const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
+
+            if (days > 0) {
+                return { text: `${days}j ${hours}h`, urgent: false, expired: false };
+            } else if (hours > 0) {
+                return { text: `${hours}h ${minutes}m`, urgent: hours < 2, expired: false };
+            } else {
+                return { text: `${minutes}m`, urgent: true, expired: false };
+            }
+        };
+
+        // ============================================
+        // COMPOSANT PRINCIPAL - APP
+        // ============================================
+
+        const BiddApp = () => {
+            const [properties, setProperties] = React.useState([]);
+            const [activeTab, setActiveTab] = React.useState('overview');
+            const [searchTerm, setSearchTerm] = React.useState('');
+            const [selectedType, setSelectedType] = React.useState('');
+            const [selectedStatus, setSelectedStatus] = React.useState('');
+            const [sortBy, setSortBy] = React.useState('createdAt');
+            const [showAddForm, setShowAddForm] = React.useState(false);
+            const [editingId, setEditingId] = React.useState(null);
+            const [expandedId, setExpandedId] = React.useState(null);
+
+            // Initialisation au chargement
+            React.useEffect(() => {
+                initializeStorage();
+                setProperties(getProperties());
+                // Rafraîchir les données toutes les 30 secondes pour les countdowns
+                const interval = setInterval(() => {
+                    setProperties(getProperties());
+                }, 30000);
+                return () => clearInterval(interval);
+            }, []);
+
+            /**
+             * Filtre et trie les propriétés selon les critères actuels
+             */
+            const getFilteredProperties = (filterStatus = null) => {
+                let filtered = properties;
+
+                // Filtre par recherche
+                if (searchTerm) {
+                    const term = searchTerm.toLowerCase();
+                    filtered = filtered.filter(p =>
+                        p.name.toLowerCase().includes(term) ||
+                        p.city.toLowerCase().includes(term)
+                    );
+                }
+
+                // Filtre par type
+                if (selectedType) {
+                    filtered = filtered.filter(p => p.type === selectedType);
+                }
+
+                // Filtre par statut
+                const statusFilter = filterStatus || selectedStatus;
+                if (statusFilter) {
+                    filtered = filtered.filter(p => p.status === statusFilter);
+                }
+
+                // Tri
+                filtered.sort((a, b) => {
+                    switch (sortBy) {
+                        case 'name':
+                            return a.name.localeCompare(b.name);
+                        case 'city':
+                            return a.city.localeCompare(b.city);
+                        case 'price':
+                            return parseInt(b.currentPrice || b.startPrice) - parseInt(a.currentPrice || a.startPrice);
+                        case 'endDate':
+                            return new Date(a.endDate) - new Date(b.endDate);
+                        case 'createdAt':
+                        default:
+                            return new Date(b.createdAt) - new Date(a.createdAt);
+                    }
+                });
+
+                return filtered;
+            };
+
+            // Statistiques pour le dashboard
+            const stats = {
+                total: properties.length,
+                toVisit: properties.filter(p => p.status === 'À visiter').length,
+                active: properties.filter(p => p.status === 'En cours').length,
+                participating: properties.filter(p => p.myLastOffer && p.myLastOffer > 0).length
+            };
+
+            const upcomingAuctions = getFilteredProperties()
+                .filter(p => p.status === 'En cours' && p.endDate)
+                .slice(0, 5);
+
+            return (
+                <div className="min-h-screen bg-gray-50">
+                    {/* En-tête */}
+                    <header className="bg-gradient-to-r from-blue-600 to-blue-800 text-white shadow-lg">
+                        <div className="max-w-7xl mx-auto px-4 py-6">
+                            <div className="flex items-center justify-between">
+                                <h1 className="text-3xl font-bold flex items-center gap-2">
+                                    🏠 BidTrack
+                                </h1>
+                                <button
+                                    onClick={() => setShowAddForm(!showAddForm)}
+                                    className="bg-white text-blue-600 hover:bg-blue-50 px-4 py-2 rounded-lg font-medium transition"
+                                >
+                                    + Ajouter bien
+                                </button>
+                            </div>
+                        </div>
+                    </header>
+
+                    <main className="max-w-7xl mx-auto px-4 py-8">
+                        {/* Formulaire d'ajout rapide */}
+                        {showAddForm && (
+                            <FormAjoutBien
+                                onSubmit={(data) => {
+                                    addProperty(data);
+                                    setProperties(getProperties());
+                                    setShowAddForm(false);
+                                }}
+                                onCancel={() => setShowAddForm(false)}
+                            />
+                        )}
+
+                        {/* Navigation par onglets */}
+                        <div className="flex gap-2 mb-6 overflow-x-auto pb-2">
+                            {[
+                                { id: 'overview', label: '📊 Vue d\'ensemble' },
+                                { id: 'toVisit', label: '📅 À visiter' },
+                                { id: 'active', label: '🔄 Enchères maintenant' },
+                                { id: 'all', label: '📋 Tous les biens' },
+                                { id: 'calendar', label: '📆 Calendrier' }
+                            ].map(tab => (
+                                <button
+                                    key={tab.id}
+                                    onClick={() => setActiveTab(tab.id)}
+                                    className={`whitespace-nowrap px-4 py-2 rounded-lg font-medium transition ${
+                                        activeTab === tab.id
+                                            ? 'bg-blue-600 text-white'
+                                            : 'bg-white text-gray-700 hover:bg-gray-100'
+                                    }`}
+                                >
+                                    {tab.label}
+                                </button>
+                            ))}
+                        </div>
+
+                        {/* VUE D'ENSEMBLE */}
+                        {activeTab === 'overview' && (
+                            <DashboardOverview
+                                stats={stats}
+                                upcomingAuctions={upcomingAuctions}
+                                onPropertyClick={(id) => {
+                                    setActiveTab('all');
+                                    setExpandedId(id);
+                                }}
+                            />
+                        )}
+
+                        {/* VUE À VISITER */}
+                        {activeTab === 'toVisit' && (
+                            <PropertyList
+                                properties={getFilteredProperties('À visiter')}
+                                onEdit={(id) => setEditingId(id)}
+                                onDelete={(id) => {
+                                    deleteProperty(id);
+                                    setProperties(getProperties());
+                                }}
+                                onArchive={(id) => {
+                                    archiveProperty(id);
+                                    setProperties(getProperties());
+                                }}
+                                expandedId={expandedId}
+                                onExpandChange={setExpandedId}
+                            />
+                        )}
+
+                        {/* VUE ENCHÈRES ACTIVES */}
+                        {activeTab === 'active' && (
+                            <PropertyList
+                                properties={getFilteredProperties('En cours').sort((a, b) => {
+                                    const timeA = getTimeRemaining(a.endDate);
+                                    const timeB = getTimeRemaining(b.endDate);
+                                    return (timeA?.urgent ? -1 : 1) - (timeB?.urgent ? -1 : 1);
+                                })}
+                                onEdit={(id) => setEditingId(id)}
+                                onDelete={(id) => {
+                                    deleteProperty(id);
+                                    setProperties(getProperties());
+                                }}
+                                onArchive={(id) => {
+                                    archiveProperty(id);
+                                    setProperties(getProperties());
+                                }}
+                                expandedId={expandedId}
+                                onExpandChange={setExpandedId}
+                                showCountdown={true}
+                            />
+                        )}
+
+                        {/* VUE TOUS LES BIENS */}
+                        {activeTab === 'all' && (
+                            <div>
+                                <FilterBar
+                                    searchTerm={searchTerm}
+                                    onSearchChange={setSearchTerm}
+                                    selectedType={selectedType}
+                                    onTypeChange={setSelectedType}
+                                    selectedStatus={selectedStatus}
+                                    onStatusChange={setSelectedStatus}
+                                    sortBy={sortBy}
+                                    onSortChange={setSortBy}
+                                />
+                                <PropertyList
+                                    properties={getFilteredProperties()}
+                                    onEdit={(id) => setEditingId(id)}
+                                    onDelete={(id) => {
+                                        deleteProperty(id);
+                                        setProperties(getProperties());
+                                    }}
+                                    onArchive={(id) => {
+                                        archiveProperty(id);
+                                        setProperties(getProperties());
+                                    }}
+                                    expandedId={expandedId}
+                                    onExpandChange={setExpandedId}
+                                />
+                            </div>
+                        )}
+
+                        {/* VUE CALENDRIER */}
+                        {activeTab === 'calendar' && (
+                            <CalendarView properties={properties} />
+                        )}
+                    </main>
+                </div>
+            );
+        };
+
+        // ============================================
+        // COMPOSANT - DASHBOARD OVERVIEW
+        // ============================================
+
+        /**
+         * Vue d'ensemble du dashboard avec statistiques clés
+         */
+        const DashboardOverview = ({ stats, upcomingAuctions, onPropertyClick }) => {
+            return (
+                <div className="space-y-6">
+                    {/* Cartes de statistiques */}
+                    <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                        {[
+                            { icon: '🏠', label: 'Biens suivis', value: stats.total },
+                            { icon: '📅', label: 'À visiter', value: stats.toVisit },
+                            { icon: '🔄', label: 'Enchères actives', value: stats.active },
+                            { icon: '💰', label: 'Je participe', value: stats.participating }
+                        ].map((card, idx) => (
+                            <div key={idx} className="bg-white rounded-lg shadow p-6">
+                                <div className="text-3xl mb-2">{card.icon}</div>
+                                <p className="text-gray-600 text-sm">{card.label}</p>
+                                <p className="text-3xl font-bold text-gray-900">{card.value}</p>
+                            </div>
+                        ))}
+                    </div>
+
+                    {/* Prochaines fins d'enchères */}
+                    <div className="bg-white rounded-lg shadow">
+                        <div className="p-6 border-b">
+                            <h2 className="text-xl font-bold">🚨 Prochaines fins d'enchères</h2>
+                        </div>
+                        <div className="p-6">
+                            {upcomingAuctions.length === 0 ? (
+                                <p className="text-gray-500">Aucune enchère active</p>
+                            ) : (
+                                <div className="space-y-4">
+                                    {upcomingAuctions.map(property => {
+                                        const timeLeft = getTimeRemaining(property.endDate);
+                                        return (
+                                            <div
+                                                key={property.id}
+                                                className={`p-4 border rounded-lg ${timeLeft?.urgent ? 'bg-red-50 border-red-200 pulse-alert' : 'bg-gray-50 border-gray-200'}`}
+                                            >
+                                                <div className="flex justify-between items-start">
+                                                    <div className="flex-1">
+                                                        <h3
+                                                            onClick={() => onPropertyClick(property.id)}
+                                                            className="font-semibold text-gray-900 cursor-pointer hover:text-blue-600"
+                                                        >
+                                                            {property.name}
+                                                        </h3>
+                                                        <p className="text-sm text-gray-600">{property.city}</p>
+                                                        <p className="text-sm mt-1">
+                                                            <span className="font-medium">Prix actuel:</span> {property.currentPrice || property.startPrice} €
+                                                        </p>
+                                                    </div>
+                                                    <div className="text-right">
+                                                        <div className={`text-lg font-bold ${timeLeft?.urgent ? 'text-red-600' : 'text-green-600'}`}>
+                                                            {timeLeft?.text}
+                                                        </div>
+                                                        <p className="text-xs text-gray-500 mt-1">
+                                                            Fin: {formatDate(property.endDate)}
+                                                        </p>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        // ============================================
+        // COMPOSANT - FILTRES
+        // ============================================
+
+        /**
+         * Barre de filtrage et tri
+         */
+        const FilterBar = ({
+            searchTerm,
+            onSearchChange,
+            selectedType,
+            onTypeChange,
+            selectedStatus,
+            onStatusChange,
+            sortBy,
+            onSortChange
+        }) => {
+            return (
+                <div className="bg-white rounded-lg shadow p-4 mb-6 space-y-4">
+                    <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
+                        {/* Recherche */}
+                        <input
+                            type="text"
+                            placeholder="Rechercher par nom ou ville..."
+                            value={searchTerm}
+                            onChange={(e) => onSearchChange(e.target.value)}
+                            className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                        />
+
+                        {/* Type de bien */}
+                        <select
+                            value={selectedType}
+                            onChange={(e) => onTypeChange(e.target.value)}
+                            className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                        >
+                            <option value="">Tous les types</option>
+                            <option value="Maison">Maison</option>
+                            <option value="Appartement">Appartement</option>
+                            <option value="Terrain">Terrain</option>
+                            <option value="Immeuble">Immeuble</option>
+                        </select>
+
+                        {/* Statut */}
+                        <select
+                            value={selectedStatus}
+                            onChange={(e) => onStatusChange(e.target.value)}
+                            className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                        >
+                            <option value="">Tous les statuts</option>
+                            <option value="À visiter">À visiter</option>
+                            <option value="En attente">En attente</option>
+                            <option value="En cours">En cours</option>
+                            <option value="Terminé">Terminé</option>
+                        </select>
+
+                        {/* Tri */}
+                        <select
+                            value={sortBy}
+                            onChange={(e) => onSortChange(e.target.value)}
+                            className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                        >
+                            <option value="createdAt">Plus récents</option>
+                            <option value="name">Nom (A-Z)</option>
+                            <option value="city">Ville (A-Z)</option>
+                            <option value="price">Prix (plus élevé)</option>
+                            <option value="endDate">Date fin (urgent)</option>
+                        </select>
+
+                        {/* Bouton réinitialiser */}
+                        <button
+                            onClick={() => {
+                                onSearchChange('');
+                                onTypeChange('');
+                                onStatusChange('');
+                                onSortChange('createdAt');
+                            }}
+                            className="px-4 py-2 bg-gray-200 hover:bg-gray-300 text-gray-700 rounded-lg font-medium transition"
+                        >
+                            Réinitialiser
+                        </button>
+                    </div>
+                </div>
+            );
+        };
+
+        // ============================================
+        // COMPOSANT - LISTE DES BIENS
+        // ============================================
+
+        /**
+         * Liste des propriétés avec expansion détails
+         */
+        const PropertyList = ({
+            properties,
+            onEdit,
+            onDelete,
+            onArchive,
+            expandedId,
+            onExpandChange,
+            showCountdown = false
+        }) => {
+            if (properties.length === 0) {
+                return (
+                    <div className="bg-white rounded-lg shadow p-12 text-center">
+                        <p className="text-gray-500 text-lg">Aucun bien ne correspond à vos critères</p>
+                    </div>
+                );
+            }
+
+            return (
+                <div className="space-y-4">
+                    {properties.map(property => (
+                        <PropertyCard
+                            key={property.id}
+                            property={property}
+                            isExpanded={expandedId === property.id}
+                            onToggleExpand={() => onExpandChange(expandedId === property.id ? null : property.id)}
+                            onEdit={onEdit}
+                            onDelete={onDelete}
+                            onArchive={onArchive}
+                            showCountdown={showCountdown}
+                        />
+                    ))}
+                </div>
+            );
+        };
+
+        // ============================================
+        // COMPOSANT - CARTE DE PROPRIÉTÉ
+        // ============================================
+
+        /**
+         * Carte de propriété avec expansion des détails
+         */
+        const PropertyCard = ({
+            property,
+            isExpanded,
+            onToggleExpand,
+            onEdit,
+            onDelete,
+            onArchive,
+            showCountdown = false
+        }) => {
+            const timeLeft = showCountdown ? getTimeRemaining(property.endDate) : null;
+
+            return (
+                <div className={`bg-white rounded-lg shadow overflow-hidden transition ${isExpanded ? 'ring-2 ring-blue-500' : ''}`}>
+                    {/* En-tête de la carte */}
+                    <div
+                        onClick={onToggleExpand}
+                        className="p-4 bg-gradient-to-r from-gray-50 to-gray-100 cursor-pointer hover:from-gray-100 hover:to-gray-200 transition"
+                    >
+                        <div className="flex items-start justify-between">
+                            <div className="flex-1">
+                                <div className="flex items-center gap-3 mb-2">
+                                    <h3 className="text-lg font-bold text-gray-900">{property.name}</h3>
+                                    {showCountdown && timeLeft && (
+                                        <span className={`text-sm font-bold px-2 py-1 rounded ${timeLeft.urgent ? 'bg-red-200 text-red-800' : 'bg-green-200 text-green-800'}`}>
+                                            {timeLeft.text}
+                                        </span>
+                                    )}
+                                </div>
+                                <div className="flex flex-wrap gap-2 items-center mb-2">
+                                    <span className="text-sm text-gray-600">📍 {property.city}</span>
+                                    <StatusBadge status={property.status} />
+                                    <PriorityBadge priority={property.priority} />
+                                </div>
+                                <p className="text-sm text-gray-600">{property.type}</p>
+                            </div>
+                            <div className="text-right">
+                                <p className="text-2xl font-bold text-blue-600">
+                                    {property.currentPrice || property.startPrice} €
+                                </p>
+                                {property.numberOfOffers > 0 && (
+                                    <p className="text-xs text-gray-600 mt-1">{property.numberOfOffers} offre(s)</p>
+                                )}
+                                <span className="text-xl ml-2">{isExpanded ? '▼' : '▶'}</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Détails dépliés */}
+                    {isExpanded && (
+                        <PropertyDetails
+                            property={property}
+                            onEdit={onEdit}
+                            onDelete={onDelete}
+                            onArchive={onArchive}
+                        />
+                    )}
+                </div>
+            );
+        };
+
+        // ============================================
+        // COMPOSANT - DÉTAILS DE LA PROPRIÉTÉ
+        // ============================================
+
+        /**
+         * Affiche les détails complets d'une propriété
+         */
+        const PropertyDetails = ({ property, onEdit, onDelete, onArchive }) => {
+            const [property_local, setPropertyLocal] = React.useState(property);
+            const [notes, setNotes] = React.useState(property.notes || []);
+            const [newNote, setNewNote] = React.useState('');
+            const [photos, setPhotos] = React.useState(property.photos || []);
+
+            /**
+             * Ajoute une note avec timestamp
+             */
+            const addNote = () => {
+                if (newNote.trim()) {
+                    const updatedNotes = [...notes, {
+                        id: Date.now(),
+                        text: newNote,
+                        timestamp: new Date().toISOString()
+                    }];
+                    setNotes(updatedNotes);
+                    updateProperty(property.id, { notes: updatedNotes });
+                    setNewNote('');
+                }
+            };
+
+            /**
+             * Supprime une note
+             */
+            const deleteNote = (noteId) => {
+                const updatedNotes = notes.filter(n => n.id !== noteId);
+                setNotes(updatedNotes);
+                updateProperty(property.id, { notes: updatedNotes });
+            };
+
+            /**
+             * Ajoute une photo
+             */
+            const addPhoto = (e) => {
+                const file = e.target.files[0];
+                if (file) {
+                    const reader = new FileReader();
+                    reader.onload = (event) => {
+                        const updatedPhotos = [...photos, event.target.result];
+                        setPhotos(updatedPhotos);
+                        updateProperty(property.id, { photos: updatedPhotos });
+                    };
+                    reader.readAsDataURL(file);
+                }
+            };
+
+            /**
+             * Supprime une photo
+             */
+            const deletePhoto = (index) => {
+                const updatedPhotos = photos.filter((_, i) => i !== index);
+                setPhotos(updatedPhotos);
+                updateProperty(property.id, { photos: updatedPhotos });
+            };
+
+            /**
+             * Met à jour un champ de la propriété
+             */
+            const updateField = (field, value) => {
+                const updated = { ...property_local, [field]: value };
+                setPropertyLocal(updated);
+                updateProperty(property.id, { [field]: value });
+            };
+
+            return (
+                <div className="border-t p-6 space-y-6 bg-gray-50">
+                    {/* Grille d'informations modifiables */}
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                        {/* Colonne 1 */}
+                        <div className="space-y-4">
+                            <EditableField
+                                label="Lien Biddit"
+                                value={property_local.biddLink}
+                                type="url"
+                                onChange={(val) => updateField('biddLink', val)}
+                                isLink={true}
+                            />
+                            <EditableField
+                                label="Prix de départ"
+                                value={property_local.startPrice}
+                                type="number"
+                                onChange={(val) => updateField('startPrice', val)}
+                            />
+                            <EditableField
+                                label="Prix actuel"
+                                value={property_local.currentPrice}
+                                type="number"
+                                onChange={(val) => updateField('currentPrice', val)}
+                            />
+                            <EditableField
+                                label="Nombre d'offres"
+                                value={property_local.numberOfOffers}
+                                type="number"
+                                onChange={(val) => updateField('numberOfOffers', val)}
+                            />
+                        </div>
+
+                        {/* Colonne 2 */}
+                        <div className="space-y-4">
+                            <EditableField
+                                label="Date de visite"
+                                value={property_local.visitDate}
+                                type="datetime-local"
+                                onChange={(val) => updateField('visitDate', val)}
+                            />
+                            <EditableField
+                                label="Date début enchères"
+                                value={property_local.startDate}
+                                type="datetime-local"
+                                onChange={(val) => updateField('startDate', val)}
+                            />
+                            <EditableField
+                                label="Date fin enchères"
+                                value={property_local.endDate}
+                                type="datetime-local"
+                                onChange={(val) => updateField('endDate', val)}
+                            />
+                        </div>
+
+                        {/* Colonne 3 */}
+                        <div className="space-y-4">
+                            <EditableField
+                                label="Statut"
+                                value={property_local.status}
+                                type="select"
+                                options={['À visiter', 'En attente', 'En cours', 'Terminé']}
+                                onChange={(val) => updateField('status', val)}
+                            />
+                            <EditableField
+                                label="Priorité"
+                                value={property_local.priority}
+                                type="select"
+                                options={['Haute', 'Moyenne', 'Basse']}
+                                onChange={(val) => updateField('priority', val)}
+                            />
+                            <EditableField
+                                label="Ma dernière offre"
+                                value={property_local.myLastOffer}
+                                type="number"
+                                onChange={(val) => updateField('myLastOffer', val)}
+                            />
+                        </div>
+                    </div>
+
+                    {/* Notes de visite */}
+                    <div className="bg-white rounded-lg p-4">
+                        <h4 className="font-semibold mb-3">📝 Notes de visite</h4>
+                        <div className="flex gap-2 mb-4">
+                            <input
+                                type="text"
+                                value={newNote}
+                                onChange={(e) => setNewNote(e.target.value)}
+                                onKeyPress={(e) => e.key === 'Enter' && addNote()}
+                                placeholder="Ajouter une note..."
+                                className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500"
+                            />
+                            <button
+                                onClick={addNote}
+                                className="px-4 py-2 bg-blue-600 text-white rounded-lg font-medium text-sm hover:bg-blue-700"
+                            >
+                                Ajouter
+                            </button>
+                        </div>
+                        {notes.length === 0 ? (
+                            <p className="text-gray-500 text-sm">Aucune note</p>
+                        ) : (
+                            <div className="space-y-2">
+                                {notes.map(note => (
+                                    <div key={note.id} className="flex justify-between items-start bg-gray-50 p-3 rounded border border-gray-200">
+                                        <div className="flex-1">
+                                            <p className="text-sm text-gray-900">{note.text}</p>
+                                            <p className="text-xs text-gray-500 mt-1">{formatDate(note.timestamp)}</p>
+                                        </div>
+                                        <button
+                                            onClick={() => deleteNote(note.id)}
+                                            className="text-red-600 hover:text-red-800 text-sm ml-2"
+                                        >
+                                            ✕
+                                        </button>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+
+                    {/* Galerie photos */}
+                    <div className="bg-white rounded-lg p-4">
+                        <h4 className="font-semibold mb-3">📸 Galerie photos</h4>
+                        <div className="mb-4">
+                            <label className="flex items-center justify-center border-2 border-dashed border-gray-300 rounded-lg p-6 cursor-pointer hover:border-blue-500 transition">
+                                <input
+                                    type="file"
+                                    accept="image/*"
+                                    onChange={addPhoto}
+                                    className="hidden"
+                                />
+                                <span className="text-gray-600">📤 Cliquez pour ajouter une photo</span>
+                            </label>
+                        </div>
+                        {photos.length === 0 ? (
+                            <p className="text-gray-500 text-sm">Aucune photo</p>
+                        ) : (
+                            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                                {photos.map((photo, idx) => (
+                                    <div key={idx} className="relative group">
+                                        <img src={photo} alt={`Photo ${idx + 1}`} className="w-full h-32 object-cover rounded-lg" />
+                                        <button
+                                            onClick={() => deletePhoto(idx)}
+                                            className="absolute top-1 right-1 bg-red-500 text-white p-1 rounded-full opacity-0 group-hover:opacity-100 transition"
+                                        >
+                                            ✕
+                                        </button>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+
+                    {/* Notes générales */}
+                    <EditableField
+                        label="Notes générales"
+                        value={property_local.generalNotes}
+                        type="textarea"
+                        onChange={(val) => updateField('generalNotes', val)}
+                    />
+
+                    {/* Boutons d'action */}
+                    <div className="flex gap-3 pt-4 border-t">
+                        {property_local.status !== 'Terminé' && (
+                            <button
+                                onClick={() => onArchive(property.id)}
+                                className="px-4 py-2 bg-yellow-500 hover:bg-yellow-600 text-white rounded-lg font-medium transition"
+                            >
+                                📦 Archiver
+                            </button>
+                        )}
+                        <button
+                            onClick={() => onDelete(property.id)}
+                            className="px-4 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg font-medium transition"
+                        >
+                            🗑️ Supprimer
+                        </button>
+                    </div>
+                </div>
+            );
+        };
+
+        // ============================================
+        // COMPOSANT - CHAMP ÉDITABLE
+        // ============================================
+
+        /**
+         * Champ éditable inline (cliquer pour modifier)
+         */
+        const EditableField = ({ label, value, type = 'text', options = [], onChange, isLink = false }) => {
+            const [isEditing, setIsEditing] = React.useState(false);
+            const [editValue, setEditValue] = React.useState(value || '');
+
+            const handleSave = () => {
+                onChange(editValue);
+                setIsEditing(false);
+            };
+
+            const handleCancel = () => {
+                setEditValue(value || '');
+                setIsEditing(false);
+            };
+
+            if (isEditing) {
+                return (
+                    <div>
+                        <label className="block text-xs font-semibold text-gray-700 mb-1">{label}</label>
+                        {type === 'textarea' ? (
+                            <textarea
+                                value={editValue}
+                                onChange={(e) => setEditValue(e.target.value)}
+                                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                                rows="3"
+                            />
+                        ) : type === 'select' ? (
+                            <select
+                                value={editValue}
+                                onChange={(e) => setEditValue(e.target.value)}
+                                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                            >
+                                {options.map(opt => (
+                                    <option key={opt} value={opt}>{opt}</option>
+                                ))}
+                            </select>
+                        ) : (
+                            <input
+                                type={type}
+                                value={editValue}
+                                onChange={(e) => setEditValue(e.target.value)}
+                                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                            />
+                        )}
+                        <div className="flex gap-2 mt-2">
+                            <button
+                                onClick={handleSave}
+                                className="px-3 py-1 bg-blue-600 text-white rounded text-sm hover:bg-blue-700"
+                            >
+                                ✓
+                            </button>
+                            <button
+                                onClick={handleCancel}
+                                className="px-3 py-1 bg-gray-300 text-gray-700 rounded text-sm hover:bg-gray-400"
+                            >
+                                ✕
+                            </button>
+                        </div>
+                    </div>
+                );
+            }
+
+            return (
+                <div
+                    onClick={() => setIsEditing(true)}
+                    className="cursor-pointer p-3 rounded-lg bg-white border border-gray-200 hover:border-blue-500 hover:bg-blue-50 transition"
+                >
+                    <label className="block text-xs font-semibold text-gray-600 mb-1">{label}</label>
+                    {isLink && value ? (
+                        <a href={value} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline text-sm break-all">
+                            {value}
+                        </a>
+                    ) : (
+                        <p className="text-gray-900 text-sm break-words">
+                            {value || <span className="text-gray-400 italic">Cliquer pour ajouter</span>}
+                        </p>
+                    )}
+                </div>
+            );
+        };
+
+        // ============================================
+        // COMPOSANT - FORMULAIRE D'AJOUT RAPIDE
+        // ============================================
+
+        /**
+         * Formulaire pour ajouter rapidement un bien
+         */
+        const FormAjoutBien = ({ onSubmit, onCancel }) => {
+            const [formData, setFormData] = React.useState({
+                name: '',
+                biddLink: '',
+                startPrice: '',
+                city: '',
+                type: 'Maison',
+                status: 'À visiter',
+                priority: 'Moyenne',
+                visitDate: '',
+                startDate: '',
+                endDate: '',
+                currentPrice: '',
+                numberOfOffers: '',
+                myLastOffer: '',
+                generalNotes: '',
+                notes: [],
+                photos: []
+            });
+
+            const handleChange = (e) => {
+                const { name, value } = e.target;
+                setFormData(prev => ({ ...prev, [name]: value }));
+            };
+
+            const handleSubmit = (e) => {
+                e.preventDefault();
+                if (formData.name && formData.city) {
+                    onSubmit(formData);
+                }
+            };
+
+            return (
+                <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+                    <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full max-h-96 overflow-y-auto">
+                        <div className="sticky top-0 bg-gradient-to-r from-blue-600 to-blue-800 text-white p-6 flex justify-between items-center">
+                            <h2 className="text-2xl font-bold">Ajouter un bien</h2>
+                            <button
+                                onClick={onCancel}
+                                className="text-2xl hover:opacity-70 transition"
+                            >
+                                ✕
+                            </button>
+                        </div>
+
+                        <form onSubmit={handleSubmit} className="p-6 space-y-4">
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <input
+                                    type="text"
+                                    name="name"
+                                    placeholder="Nom du bien *"
+                                    value={formData.name}
+                                    onChange={handleChange}
+                                    required
+                                    className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                                />
+                                <input
+                                    type="text"
+                                    name="city"
+                                    placeholder="Ville *"
+                                    value={formData.city}
+                                    onChange={handleChange}
+                                    required
+                                    className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                                />
+                                <select
+                                    name="type"
+                                    value={formData.type}
+                                    onChange={handleChange}
+                                    className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                                >
+                                    <option value="Maison">Maison</option>
+                                    <option value="Appartement">Appartement</option>
+                                    <option value="Terrain">Terrain</option>
+                                    <option value="Immeuble">Immeuble</option>
+                                </select>
+                                <input
+                                    type="number"
+                                    name="startPrice"
+                                    placeholder="Prix de départ (€)"
+                                    value={formData.startPrice}
+                                    onChange={handleChange}
+                                    className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                                />
+                                <input
+                                    type="url"
+                                    name="biddLink"
+                                    placeholder="Lien Biddit"
+                                    value={formData.biddLink}
+                                    onChange={handleChange}
+                                    className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                                />
+                                <input
+                                    type="datetime-local"
+                                    name="visitDate"
+                                    placeholder="Date de visite"
+                                    value={formData.visitDate}
+                                    onChange={handleChange}
+                                    className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                                />
+                                <input
+                                    type="datetime-local"
+                                    name="startDate"
+                                    placeholder="Début enchères"
+                                    value={formData.startDate}
+                                    onChange={handleChange}
+                                    className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                                />
+                                <input
+                                    type="datetime-local"
+                                    name="endDate"
+                                    placeholder="Fin enchères"
+                                    value={formData.endDate}
+                                    onChange={handleChange}
+                                    className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                                />
+                            </div>
+
+                            <textarea
+                                name="generalNotes"
+                                placeholder="Notes générales..."
+                                value={formData.generalNotes}
+                                onChange={handleChange}
+                                rows="3"
+                                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                            />
+
+                            <div className="flex gap-3 pt-4">
+                                <button
+                                    type="submit"
+                                    className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 transition"
+                                >
+                                    ✓ Ajouter le bien
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={onCancel}
+                                    className="flex-1 px-4 py-2 bg-gray-300 text-gray-700 rounded-lg font-medium hover:bg-gray-400 transition"
+                                >
+                                    Annuler
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            );
+        };
+
+        // ============================================
+        // COMPOSANT - VUE CALENDRIER
+        // ============================================
+
+        /**
+         * Vue calendaire des fins d'enchères
+         */
+        const CalendarView = ({ properties }) => {
+            const [currentDate, setCurrentDate] = React.useState(new Date(2026, 4, 19)); // 19 mai 2026
+
+            // Filtre les propriétés avec date de fin
+            const propertiesWithEndDate = properties.filter(p => p.endDate);
+
+            // Groupe les propriétés par date
+            const eventsByDate = {};
+            propertiesWithEndDate.forEach(property => {
+                const date = new Date(property.endDate).toLocaleDateString('fr-BE');
+                if (!eventsByDate[date]) {
+                    eventsByDate[date] = [];
+                }
+                eventsByDate[date].push(property);
+            });
+
+            // Calcule les jours du mois
+            const firstDay = new Date(currentDate.getFullYear(), currentDate.getMonth(), 1);
+            const lastDay = new Date(currentDate.getFullYear(), currentDate.getMonth() + 1, 0);
+            const daysInMonth = lastDay.getDate();
+            const startingDayOfWeek = firstDay.getDay();
+
+            const days = [];
+            for (let i = 0; i < startingDayOfWeek; i++) {
+                days.push(null);
+            }
+            for (let i = 1; i <= daysInMonth; i++) {
+                days.push(i);
+            }
+
+            const monthName = currentDate.toLocaleDateString('fr-BE', { month: 'long', year: 'numeric' });
+
+            return (
+                <div className="bg-white rounded-lg shadow overflow-hidden">
+                    {/* En-tête du calendrier */}
+                    <div className="p-6 border-b flex justify-between items-center">
+                        <button
+                            onClick={() => setCurrentDate(new Date(currentDate.getFullYear(), currentDate.getMonth() - 1))}
+                            className="px-4 py-2 bg-gray-200 hover:bg-gray-300 rounded-lg"
+                        >
+                            ← Précédent
+                        </button>
+                        <h2 className="text-2xl font-bold capitalize">{monthName}</h2>
+                        <button
+                            onClick={() => setCurrentDate(new Date(currentDate.getFullYear(), currentDate.getMonth() + 1))}
+                            className="px-4 py-2 bg-gray-200 hover:bg-gray-300 rounded-lg"
+                        >
+                            Suivant →
+                        </button>
+                    </div>
+
+                    {/* Grille du calendrier */}
+                    <div className="p-4">
+                        {/* Jours de la semaine */}
+                        <div className="grid grid-cols-7 gap-2 mb-4">
+                            {['Lun', 'Mar', 'Mer', 'Jeu', 'Ven', 'Sam', 'Dim'].map(day => (
+                                <div key={day} className="text-center font-bold text-gray-600 py-2">
+                                    {day}
+                                </div>
+                            ))}
+                        </div>
+
+                        {/* Jours du mois */}
+                        <div className="grid grid-cols-7 gap-2">
+                            {days.map((day, idx) => {
+                                const dateStr = day ? new Date(currentDate.getFullYear(), currentDate.getMonth(), day).toLocaleDateString('fr-BE') : '';
+                                const events = dateStr ? (eventsByDate[dateStr] || []) : [];
+
+                                return (
+                                    <div
+                                        key={idx}
+                                        className={`p-2 rounded-lg border ${day ? 'min-h-24 bg-white border-gray-200' : 'bg-gray-50 border-gray-100'}`}
+                                    >
+                                        {day && (
+                                            <>
+                                                <p className="font-bold text-gray-900 mb-1">{day}</p>
+                                                <div className="space-y-1">
+                                                    {events.map(property => (
+                                                        <div
+                                                            key={property.id}
+                                                            className={`text-xs p-1 rounded line-clamp-2 ${
+                                                                property.status === 'En cours'
+                                                                    ? 'bg-green-100 text-green-800'
+                                                                    : 'bg-blue-100 text-blue-800'
+                                                            }`}
+                                                        >
+                                                            {property.name}
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </>
+                                        )}
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        // ============================================
+        // INITIALISATION ET RENDU
+        // ============================================
+
+        // Point d'entrée de l'application
+        ReactDOM.createRoot(document.getElementById('root')).render(<BiddApp />);
+    </script>
+</body>
+</html>
